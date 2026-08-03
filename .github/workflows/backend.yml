@@ -1,9 +1,14 @@
 name: Backend CI/CD (Express + Docker + EC2)
+
 on:
   push:
     branches:
       - Backend
   workflow_dispatch:
+
+env:
+  BACKEND_DIR: exam-app-backend/backend
+
 jobs:
   # ========== CI JOB (Testing) ==========
   ci:
@@ -11,14 +16,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
           cache: "npm"
+          cache-dependency-path: ${{ env.BACKEND_DIR }}/package-lock.json
+
       - name: Install dependencies
+        working-directory: ${{ env.BACKEND_DIR }}
         run: npm install
+
       - name: Test server start
+        working-directory: ${{ env.BACKEND_DIR }}
         env:
           PORT: 5000
           JWT_SECRET: test_secret
@@ -27,6 +38,7 @@ jobs:
           node server.js &
           sleep 5
           curl http://localhost:5000 || echo "Server responded"
+
   # ========== DOCKER BUILD JOB ==========
   docker:
     runs-on: ubuntu-latest
@@ -35,15 +47,22 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Build Docker image
+        working-directory: ${{ env.BACKEND_DIR }}
         run: |
           docker build -t exam-backend:new .
           docker save exam-backend:new -o exam-backend-image.tar
+
+      - name: Move image to workspace root
+        run: mv ${{ env.BACKEND_DIR }}/exam-backend-image.tar ./exam-backend-image.tar
+
       - name: Upload Docker image artifact
         uses: actions/upload-artifact@v4
         with:
           name: docker-image-backend
           path: exam-backend-image.tar
+
   # ========== DEPLOY TO EC2 ==========
   deploy:
     runs-on: ubuntu-latest
@@ -55,6 +74,7 @@ jobs:
         with:
           name: docker-image-backend
           path: ./
+
       - name: Copy Docker image to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -63,6 +83,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           source: "exam-backend-image.tar"
           target: "/home/ubuntu/exam-portal-backend/"
+
       - name: Deploy with Health Check & Rollback
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -86,9 +107,10 @@ jobs:
               -p 5001:5000 \
               -e PORT=5000 \
               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-               exam-backend:new
+              -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+              exam-backend:new
             sleep 10
-            # Health check - hits the real /health route (checks DB connectivity too)
+            # Health check - hits the real /api/health route
             if curl -f http://localhost:5001/api/health; then
               echo "Health check PASSED - Deploying..."
               docker stop test-container-backend
