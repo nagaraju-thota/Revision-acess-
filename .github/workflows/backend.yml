@@ -3,7 +3,7 @@ name: Backend CI/CD (Express + Docker + EC2)
 on:
   push:
     branches:
-      - Backend
+      - new-backend
   workflow_dispatch:
 
 env:
