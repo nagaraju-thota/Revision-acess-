@@ -133,170 +133,143 @@ jobs:
           # envs: DATABASE_URL,JWT_SECRET
 
           script: |
-
-            cd /home/ubuntu/exam-portal-backend/
- 
             echo "=========================================="
-
             echo "Loading Docker image..."
-
             echo "=========================================="
-
             docker load -i exam-backend-image.tar
- 
             echo ""
-
             echo "=========================================="
-
             echo "Testing new container on port 8081..."
-
             echo "=========================================="
-
-            # Run test container on a temporary port
-
             docker run -d \
-
               --name test-container-backend \
-
               --env-file /home/ubuntu/exam-portal-backend/.env \
-
               -p 8081:5000 \
-
               exam-backend:new
- 
-            sleep 10
- 
-            # Health check - adjust path if you have a dedicated /health route
 
-            if curl -f http://localhost:8081/; then
+  sleep 10
 
-              echo "Health check PASSED - Deploying..."
+  if curl -f http://localhost:8081/; then
 
-              docker stop test-container-backend
+    echo "Health check PASSED - Deploying..."
 
-              docker rm test-container-backend
- 
-              # Backup existing production container
+    docker stop test-container-backend
 
-              if docker ps -a --format '{{.Names}}' | grep -q "^exam-backend-prod$"; then
+    docker rm test-container-backend
 
-                echo "Backing up current production..."
+    if docker ps -a --format '{{.Names}}' | grep -q "^exam-backend-prod$"; then
 
-                docker tag exam-backend-prod exam-backend-prod:backup
+      echo "Backing up current production..."
 
-                docker stop exam-backend-prod
+      docker tag exam-backend-prod exam-backend-prod:backup
 
-                docker rm exam-backend-prod
+      docker stop exam-backend-prod
 
-              fi
- 
-              # Run new production container
+      docker rm exam-backend-prod
 
-              echo "Starting new production container..."
+    fi
 
-              docker run -d \
+    echo "Starting new production container..."
 
-                --name exam-backend-prod \
+    docker run -d \
 
-                --restart always \
+      --name exam-backend-prod \
 
-                --env-file /home/ubuntu/exam-portal-backend/.env \
+      --restart always \
 
-                -p 5000:5000 \
+      --env-file /home/ubuntu/exam-portal-backend/.env \
 
-                exam-backend:new
- 
-              sleep 5
- 
-              # Final health check
+      -p 5000:5000 \
 
-              if curl -f http://localhost:5000/; then
+      exam-backend:new
 
-                echo ""
+    sleep 5
 
-                echo "=========================================="
+    if curl -f http://localhost:5000/; then
 
-                echo "DEPLOYMENT SUCCESSFUL!"
+      echo ""
 
-                echo "=========================================="
+      echo "=========================================="
 
-                echo "Backend reachable via:"
+      echo "DEPLOYMENT SUCCESSFUL!"
 
-                echo "http://kts-exam-backend.duckdns.org:5000"
+      echo "=========================================="
 
-                docker ps | grep exam-backend-prod
+      echo "Backend reachable via:"
 
-              else
+      echo "http://kts-exam-backend.duckdns.org:5000"
 
-                echo "New container failed! Rolling back..."
+      docker ps | grep exam-backend-prod
 
-                docker stop exam-backend-prod
+    else
 
-                docker rm exam-backend-prod
+      echo "New container failed! Rolling back..."
 
-                docker run -d \
+      docker stop exam-backend-prod
 
-                  --name exam-backend-prod \
+      docker rm exam-backend-prod
 
-                  --restart always \
+      docker run -d \
 
-                  --env-file /home/ubuntu/exam-portal-backend/.env \
+        --name exam-backend-prod \
 
-                  -p 5000:5000 \
+        --restart always \
 
-                  exam-backend-prod:backup
+        --env-file /home/ubuntu/exam-portal-backend/.env \
 
-                echo "Rollback complete - Previous version restored"
+        -p 5000:5000 \
 
-              fi
- 
-            else
+        exam-backend-prod:backup
 
-              echo ""
+      echo "Rollback complete - Previous version restored"
 
-              echo "=========================================="
+    fi
 
-              echo "Health check FAILED - Not deploying!"
+  else
 
-              echo "=========================================="
+    echo ""
 
-              echo "Keeping existing production container running"
+    echo "=========================================="
 
-              echo ""
+    echo "Health check FAILED - Not deploying!"
 
-              echo "Test container logs:"
+    echo "=========================================="
 
-              docker logs test-container-backend --tail 20
+    echo "Keeping existing production container running"
 
-              docker stop test-container-backend
+    echo ""
 
-              docker rm test-container-backend
+    echo "Test container logs:"
 
-              exit 1
+    docker logs test-container-backend --tail 20
 
-            fi
- 
-            # Cleanup
+    docker stop test-container-backend
 
-            rm -f exam-backend-image.tar
- 
-            echo ""
+    docker rm test-container-backend
 
-            echo "=========================================="
+    exit 1
 
-            echo "Final Status:"
+  fi
 
-            echo "=========================================="
+  rm -f exam-backend-image.tar
 
-            docker ps
- 
-            echo ""
+  echo ""
 
-            echo "=========================================="
+  echo "=========================================="
 
-            echo "Recent Logs:"
+  echo "Final Status:"
 
-            echo "=========================================="
+  echo "=========================================="
 
-            docker logs exam-backend-prod --tail 20
+  docker ps
+
+  echo ""
+
+  echo "=========================================="
+
+  echo "Recent Logs:"
+
+  echo "=========================================="
+
+  docker logs exam-backend-prod --tail 20
  
