@@ -3,6 +3,15 @@
 // the old JSON-file store, but every function is now async and talks to
 // Postgres via the shared pool in data/pool.js. Every route already awaits
 // these calls, so nothing about the route contracts changed.
+//
+// Questions now come in three flavors, distinguished by the `type` column:
+//   - "mcq"        (original): options + correct_index
+//   - "fill_blank": text with a ___ blank + accepted_answers (array, any
+//                   one of them counts as correct, case/whitespace-insensitive)
+//   - "coding":     problem_statement + optional starter_code/sample_output.
+//                   There's no safe way to auto-execute/grade arbitrary
+//                   submitted code here, so coding answers are stored as-is
+//                   for manual review and excluded from the automatic score.
 // ---------------------------------------------------------------------------
 
 const pool = require("./pool");
@@ -48,8 +57,8 @@ async function init() {
       domain_id TEXT NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
       local_id INTEGER NOT NULL,
       text TEXT NOT NULL,
-      options JSONB NOT NULL,
-      correct_index INTEGER NOT NULL,
+      options JSONB,
+      correct_index INTEGER,
       UNIQUE (domain_id, local_id)
     );
 
@@ -69,6 +78,22 @@ async function init() {
     );
 
     CREATE SEQUENCE IF NOT EXISTS result_id_seq START 1004;
+  `);
+
+  // Additive migration for fill-in-the-blank + coding question types. Runs
+  // every boot; every statement is IF NOT EXISTS / idempotent, so it's a
+  // no-op once applied. options/correct_index used to be NOT NULL back when
+  // "questions" only meant MCQ -- relaxed here since fill_blank/coding rows
+  // don't use them.
+  await pool.query(`
+    ALTER TABLE questions ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'mcq';
+    ALTER TABLE questions ADD COLUMN IF NOT EXISTS accepted_answers JSONB;
+    ALTER TABLE questions ADD COLUMN IF NOT EXISTS problem_statement TEXT;
+    ALTER TABLE questions ADD COLUMN IF NOT EXISTS language TEXT;
+    ALTER TABLE questions ADD COLUMN IF NOT EXISTS starter_code TEXT;
+    ALTER TABLE questions ADD COLUMN IF NOT EXISTS sample_output TEXT;
+    ALTER TABLE questions ALTER COLUMN options DROP NOT NULL;
+    ALTER TABLE questions ALTER COLUMN correct_index DROP NOT NULL;
   `);
 
   // Bootstrap check is on admins (not students), since students now only
@@ -165,8 +190,9 @@ async function updateDomainDuration(domainId, durationSeconds) {
 }
 
 // Admin-created domain. Starts with an empty question bank — use
-// addQuestions afterward to build it up. Returns { domain } on success or
-// { error } — never throws, so routes can turn `error` into an HTTP response.
+// addQuestions/addFillBlankQuestions/addCodingQuestion afterward to build it
+// up. Returns { domain } on success or { error } — never throws, so routes
+// can turn `error` into an HTTP response.
 async function addDomain({ id, name, description, duration }) {
   const cleanName = (name || "").trim();
   if (!cleanName) return { error: "Domain name is required." };
@@ -234,20 +260,32 @@ async function deleteDomain(domainId) {
   return { deleted: true };
 }
 
-// Exam paper WITHOUT correct answers (safe to send to a student).
+// Exam paper WITHOUT correct answers (safe to send to a student). correct_index
+// and accepted_answers are intentionally left out of the SELECT below --
+// never just stripped client-side -- so a correct answer can never leak over
+// the wire to a student.
 async function getExamForStudent(domainId) {
   const meta = await getDomainMeta(domainId);
   if (!meta) return null;
   const { rows } = await pool.query(
-    "SELECT local_id AS id, text, options FROM questions WHERE domain_id = $1 ORDER BY local_id",
+    `SELECT local_id AS id, type, text, options,
+            problem_statement AS "problemStatement",
+            language, starter_code AS "starterCode", sample_output AS "sampleOutput"
+     FROM questions WHERE domain_id = $1 ORDER BY local_id`,
     [domainId]
   );
   return { domainId: meta.id, title: meta.name, duration: meta.duration, questions: rows };
 }
 
+// Full question bank INCLUDING answers -- admin-only (Insights tab question
+// picker, post-update question counts, etc).
 async function getQuestionsWithAnswers(domainId) {
   const { rows } = await pool.query(
-    "SELECT local_id AS id, text, options, correct_index AS \"correctIndex\" FROM questions WHERE domain_id = $1 ORDER BY local_id",
+    `SELECT local_id AS id, type, text, options, correct_index AS "correctIndex",
+            accepted_answers AS "acceptedAnswers",
+            problem_statement AS "problemStatement",
+            language, starter_code AS "starterCode", sample_output AS "sampleOutput"
+     FROM questions WHERE domain_id = $1 ORDER BY local_id`,
     [domainId]
   );
   return rows;
@@ -266,7 +304,7 @@ async function addQuestions(domainId, newQuestions) {
     for (let i = 0; i < newQuestions.length; i++) {
       const q = newQuestions[i];
       await client.query(
-        "INSERT INTO questions (domain_id, local_id, text, options, correct_index) VALUES ($1,$2,$3,$4,$5)",
+        "INSERT INTO questions (domain_id, local_id, type, text, options, correct_index) VALUES ($1,$2,'mcq',$3,$4,$5)",
         [domainId, startId + i, q.text, JSON.stringify(q.options), q.correctIndex]
       );
     }
@@ -281,11 +319,98 @@ async function addQuestions(domainId, newQuestions) {
   return getQuestionsWithAnswers(domainId);
 }
 
+// Same append pattern as addQuestions, but for fill-in-the-blank questions:
+// text carries the ___ blank inline, accepted_answers is the array of
+// strings that count as correct (any one match, matched case/whitespace-
+// insensitively at grading time in submitExam).
+async function addFillBlankQuestions(domainId, newQuestions) {
+  const { rows } = await pool.query(
+    "SELECT COALESCE(MAX(local_id), 0) AS max_id FROM questions WHERE domain_id = $1",
+    [domainId]
+  );
+  const startId = rows[0].max_id + 1;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (let i = 0; i < newQuestions.length; i++) {
+      const q = newQuestions[i];
+      await client.query(
+        "INSERT INTO questions (domain_id, local_id, type, text, accepted_answers) VALUES ($1,$2,'fill_blank',$3,$4)",
+        [domainId, startId + i, q.text, JSON.stringify(q.acceptedAnswers)]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return getQuestionsWithAnswers(domainId);
+}
+
+// Coding questions are added one at a time from a form (title, language,
+// problem statement, optional starter code / sample output), not parsed
+// from pasted text like MCQ/fill-blank. `text` doubles as the question
+// title so it lines up with how mcq/fill_blank use that column.
+async function addCodingQuestion(domainId, { title, language, problemStatement, starterCode, sampleOutput }) {
+  const { rows } = await pool.query(
+    "SELECT COALESCE(MAX(local_id), 0) AS max_id FROM questions WHERE domain_id = $1",
+    [domainId]
+  );
+  const localId = rows[0].max_id + 1;
+
+  await pool.query(
+    `INSERT INTO questions (domain_id, local_id, type, text, language, problem_statement, starter_code, sample_output)
+     VALUES ($1,$2,'coding',$3,$4,$5,$6,$7)`,
+    [domainId, localId, title, language || null, problemStatement || null, starterCode || null, sampleOutput || null]
+  );
+
+  return getQuestionsWithAnswers(domainId);
+}
+
+// Removes one question (any type) from a domain's bank, addressed by its
+// local_id (the same id the frontend already renders/keys questions by --
+// see local_id's UNIQUE(domain_id, local_id) constraint). Used by the
+// fill-blank and coding panels' delete buttons. Returns { error } if no such
+// question exists, else the domain's remaining question list so the caller
+// can update its UI without a second round trip.
+async function deleteQuestion(domainId, localId) {
+  const { rowCount } = await pool.query(
+    "DELETE FROM questions WHERE domain_id = $1 AND local_id = $2",
+    [domainId, localId]
+  );
+  if (rowCount === 0) return { error: "Question not found." };
+  return { questions: await getQuestionsWithAnswers(domainId) };
+}
+
 async function submitExam({ studentId, name, domainId, answers, timeTaken, reason, violationCount, violations }) {
   const questions = await getQuestionsWithAnswers(domainId);
+
+  // score/total only reflect auto-gradable questions (mcq + fill_blank).
+  // Coding answers are stored verbatim below for manual review -- there's
+  // no safe way to execute arbitrary submitted code here to check it -- so
+  // they're excluded from both the numerator and the denominator rather
+  // than silently counted wrong.
   let score = 0;
+  let total = 0;
   questions.forEach((q) => {
-    if (answers[q.id] === q.correctIndex) score += 1;
+    const studentAnswer = answers[q.id];
+    if (q.type === "fill_blank") {
+      total += 1;
+      const accepted = Array.isArray(q.acceptedAnswers) ? q.acceptedAnswers : [];
+      const normalized = studentAnswer === undefined || studentAnswer === null ? "" : String(studentAnswer).trim().toLowerCase();
+      if (normalized && accepted.some((a) => String(a).trim().toLowerCase() === normalized)) {
+        score += 1;
+      }
+    } else if (q.type === "coding") {
+      // not auto-graded -- intentionally left out of score/total
+    } else {
+      total += 1;
+      if (studentAnswer === q.correctIndex) score += 1;
+    }
   });
 
   const { rows } = await pool.query("SELECT 'R' || nextval('result_id_seq') AS result_id");
@@ -297,7 +422,7 @@ async function submitExam({ studentId, name, domainId, answers, timeTaken, reaso
   await pool.query(
     `INSERT INTO results (result_id, student_id, name, domain_id, score, total, time_taken, reason, submitted_at, answers, violation_count, violations)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [resultId, studentId, name, domainId, score, questions.length, timeTaken || "—", reason || "manual", submittedAt, JSON.stringify(answers), cleanViolationCount, JSON.stringify(cleanViolations)]
+    [resultId, studentId, name, domainId, score, total, timeTaken || "—", reason || "manual", submittedAt, JSON.stringify(answers), cleanViolationCount, JSON.stringify(cleanViolations)]
   );
 
   // One attempt per Employee ID: locks this account out of future logins.
@@ -309,7 +434,7 @@ async function submitExam({ studentId, name, domainId, answers, timeTaken, reaso
     name,
     domainId,
     score,
-    total: questions.length,
+    total,
     timeTaken: timeTaken || "—",
     reason: reason || "manual",
     submittedAt,
@@ -354,41 +479,73 @@ async function getResultsByStudent(studentId) {
 
 // Aggregate correct-vs-wrong-vs-unanswered counts for ONE question across
 // every result ever submitted for its domain -- powers the admin pie
-// chart. answers is stored as JSONB keyed by the question's local_id
-// (as a string, since JSON object keys always are), so `?` checks whether
-// that question was answered at all and `->>` pulls out which option was
-// picked. We compare as TEXT (correct_index::text) rather than casting the
-// stored answer to ::int -- any result whose answers blob has a
-// non-numeric value at this key (legacy/bad data, a stray null, etc.)
-// would otherwise blow up the cast with "invalid input syntax for type
-// integer" and 500 the whole endpoint, since Postgres doesn't guarantee
-// short-circuit evaluation of the AND inside FILTER (WHERE ...).
+// chart. Meaningful for both mcq and fill_blank questions; coding stays
+// unclassified (see the loop below) since there's no safe way to
+// auto-grade arbitrary submitted code here.
 //
-// $2 is bound to `q.local_id` exactly once, with an explicit ::int cast
-// (its natural type, since it's a JS Number) -- everywhere else we derive
-// the JSONB key from q.local_id::text instead of re-using $2. Postgres
-// infers a single type per parameter across the whole prepared statement,
-// so mixing a bare `q.local_id = $2` with `$2::text` elsewhere used to make
-// it settle on text and then choke with "operator does not exist: integer
-// = text" on the bare comparison.
+// The grading itself happens in JS rather than SQL because fill_blank
+// answers need the same case/whitespace-insensitive "any accepted answer
+// matches" comparison used at submit time (see submitExam above) -- that's
+// awkward to express as a single SQL predicate, especially against a JSONB
+// array of accepted answers. answers is stored as JSONB keyed by the
+// question's local_id (as a string, since JSON object keys always are).
+//
+// $2 is bound to `q.local_id` with an explicit ::int cast (its natural
+// type, since it's a JS Number) to match how it's used in the WHERE clause.
 async function getQuestionStats(domainId, questionLocalId) {
   const { rows } = await pool.query(
-    `SELECT q.text, q.options, q.correct_index AS "correctIndex",
-            COUNT(r.result_id)::int AS "totalAttempts",
-            COUNT(*) FILTER (
-              WHERE r.answers ? q.local_id::text AND (r.answers->>q.local_id::text) = q.correct_index::text
-            )::int AS correct,
-            COUNT(*) FILTER (
-              WHERE r.answers ? q.local_id::text AND (r.answers->>q.local_id::text) != q.correct_index::text
-            )::int AS wrong,
-            COUNT(*) FILTER (WHERE NOT (r.answers ? q.local_id::text))::int AS unanswered
+    `SELECT q.type, q.text, q.options, q.correct_index AS "correctIndex",
+            q.accepted_answers AS "acceptedAnswers",
+            r.result_id AS "resultId", r.answers
      FROM questions q
      LEFT JOIN results r ON r.domain_id = q.domain_id
-     WHERE q.domain_id = $1 AND q.local_id = $2::int
-     GROUP BY q.text, q.options, q.correct_index`,
+     WHERE q.domain_id = $1 AND q.local_id = $2::int`,
     [domainId, questionLocalId]
   );
-  return rows[0] || null;
+  if (rows.length === 0) return null;
+
+  const { type, text, options, correctIndex, acceptedAnswers } = rows[0];
+  const acceptedNormalized = (Array.isArray(acceptedAnswers) ? acceptedAnswers : []).map((a) =>
+    String(a).trim().toLowerCase()
+  );
+  const key = String(questionLocalId);
+
+  let totalAttempts = 0;
+  let correct = 0;
+  let wrong = 0;
+  let unanswered = 0;
+
+  for (const row of rows) {
+    if (!row.resultId) continue; // LEFT JOIN found no results at all for this domain
+    totalAttempts += 1;
+
+    const answers = row.answers || {};
+    if (!(key in answers)) {
+      unanswered += 1;
+      continue;
+    }
+
+    if (type === "coding") {
+      // Not auto-gradable -- deliberately left uncounted (matches the prior
+      // SQL's behavior for coding rows) rather than guessed at.
+      continue;
+    }
+
+    const studentAnswer = answers[key];
+    let isCorrect;
+    if (type === "fill_blank") {
+      const normalized =
+        studentAnswer === undefined || studentAnswer === null ? "" : String(studentAnswer).trim().toLowerCase();
+      isCorrect = normalized !== "" && acceptedNormalized.includes(normalized);
+    } else {
+      isCorrect = studentAnswer === correctIndex;
+    }
+
+    if (isCorrect) correct += 1;
+    else wrong += 1;
+  }
+
+  return { type, text, options, correctIndex, totalAttempts, correct, wrong, unanswered };
 }
 
 async function getResultById(resultId) {
@@ -406,10 +563,7 @@ async function getResultById(resultId) {
   const r = rows[0];
   if (!r) return null;
 
-  const { rows: questions } = await pool.query(
-    "SELECT local_id AS id, text, options, correct_index AS \"correctIndex\" FROM questions WHERE domain_id = $1 ORDER BY local_id",
-    [r.domainId]
-  );
+  const questions = await getQuestionsWithAnswers(r.domainId);
 
   return {
     ...r,
@@ -431,6 +585,9 @@ module.exports = {
   getExamForStudent,
   getQuestionsWithAnswers,
   addQuestions,
+  addFillBlankQuestions,
+  addCodingQuestion,
+  deleteQuestion,
   submitExam,
   getAllResults,
   getResultById,
