@@ -11,7 +11,16 @@ const adminRoutes = require("./routes/admin.routes");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+// CORS_ORIGIN is a comma-separated allowlist (see .env.example). Falls back
+// to allowing everything if unset, so this still works out of the box in
+// local dev -- set CORS_ORIGIN in production so only the real frontend can
+// call this API from a browser.
+const allowedOrigins = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+app.use(cors(allowedOrigins.length > 0 ? { origin: allowedOrigins } : {}));
+
 app.use(express.json({ limit: "6mb" }));
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
