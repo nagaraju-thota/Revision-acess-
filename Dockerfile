@@ -1,20 +1,36 @@
-# Use Node.js 20 Alpine image
-FROM node:20-alpine
+# ---- Build stage ----
+FROM node:22-alpine AS builder
 
-# Set the working directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+RUN apk update && apk upgrade --no-cache
 
-# Install production dependencies
+COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-# Copy the rest of the application
 COPY . .
 
-# Expose the application port
+# ---- Runtime stage ----
+FROM node:22-alpine AS runtime
+
+WORKDIR /app
+
+RUN apk update && apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx
+
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/server.js ./server.js
+COPY --from=builder /app/routes ./routes
+COPY --from=builder /app/utils ./utils
+COPY --from=builder /app/data ./data
+
+# Alpine already ships a low-privilege 'node' user in the official
+# node:*-alpine images — reuse it instead of creating a new one.
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 5000
 
-# Start the application
-CMD ["npm", "start"]
+CMD ["node", "server.js"]

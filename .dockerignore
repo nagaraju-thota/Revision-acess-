@@ -1,0 +1,43 @@
+# Dependencies (installed fresh in the build stage)
+node_modules
+npm-debug.log
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Git
+.git
+.gitignore
+
+# Editor / IDE
+.vscode
+.claude
+*.swp
+
+# CI/CD
+.github
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Docs
+README.md
+
+# One-off scripts not needed at runtime
+check_schema.js
+check_state.js
+fix_questions_id.js
+fix_schema.js
+fix_seq.js
+reseed_missing.js
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
