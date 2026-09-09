@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - new-backend
+  workflow_dispatch: 
 
 env:
   BUILD_ID: build-${{ github.run_number }}
