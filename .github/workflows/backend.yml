@@ -92,25 +92,25 @@ jobs:
         run: |
           curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
             --upload-file trivy-image-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revision-access-trivy-reports/image-scan/${{ env.BUILD_ID }}/trivy-image-report.txt"
+            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/image-scan/${{ env.BUILD_ID }}/trivy-image-report.txt"
 
       - name: Upload Filesystem Vulnerability report to Nexus
         run: |
           curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
             --upload-file trivy-fs-vulnerability-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revision-access-trivy-reports/filesystem-scan/vulnerabilities/${{ env.BUILD_ID }}/trivy-fs-vulnerability-report.txt"
+            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/filesystem-scan/vulnerabilities/${{ env.BUILD_ID }}/trivy-fs-vulnerability-report.txt"
 
       - name: Upload Filesystem Secret report to Nexus
         run: |
           curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
             --upload-file trivy-fs-secret-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revision-access-trivy-reports/filesystem-scan/secrets/${{ env.BUILD_ID }}/trivy-fs-secret-report.txt"
+            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/filesystem-scan/secrets/${{ env.BUILD_ID }}/trivy-fs-secret-report.txt"
 
       - name: Upload Config Scan report to Nexus (Dockerfile)
         run: |
           curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
             --upload-file trivy-config-dockerfile-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revision-access-trivy-reports/config-scan/dockerfile/${{ env.BUILD_ID }}/trivy-config-dockerfile-report.txt"
+            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/config-scan/dockerfile/${{ env.BUILD_ID }}/trivy-config-dockerfile-report.txt"
 
       # ---------------------------------------------------------------
       # GATE: fail the job if ANY scan found issues (after all uploads)
