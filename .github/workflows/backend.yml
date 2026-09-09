@@ -1,275 +1,79 @@
 name: Backend CI/CD (Node + Docker + EC2)
  
 on:
-
   push:
-
     branches:
-
       - new-backend
-
   workflow_dispatch:
  
 jobs:
-
   # ========== CI JOB (Testing/Build) ==========
-
   ci:
-
     runs-on: ubuntu-latest
-
     steps:
-
       - name: Checkout code
-
         uses: actions/checkout@v4
  
       - name: Setup Node.js
-
         uses: actions/setup-node@v4
-
         with:
-
           node-version: "18"
-
           cache: "npm"
  
       - name: Install dependencies
-
         run: npm install
  
       # Uncomment once you have tests in package.json
-
       # - name: Run tests
-
       #   run: npm test
  
   # ========== DOCKER BUILD JOB ==========
-
   docker:
-
     runs-on: ubuntu-latest
-
     needs: ci
-
     if: success()
-
     steps:
-
       - name: Checkout code
-
         uses: actions/checkout@v4
  
       - name: Build Docker image
-
         run: |
-
           docker build -t exam-backend:new .
-
           docker save exam-backend:new -o exam-backend-image.tar
  
       - name: Upload Docker image artifact
-
         uses: actions/upload-artifact@v4
-
         with:
-
           name: docker-image-backend
-
           path: exam-backend-image.tar
  
   # ========== DEPLOY TO EC2 ==========
-
   deploy:
-
     runs-on: ubuntu-latest
-
     needs: docker
-
     if: success()
-
     steps:
-
       - name: Download Docker image
-
         uses: actions/download-artifact@v4
-
         with:
-
           name: docker-image-backend
-
           path: ./
  
       - name: Copy Docker image to EC2
-
         uses: appleboy/scp-action@v0.1.7
-
         with:
-
           host: ${{ secrets.EC2_HOST }}
-
           username: ${{ secrets.EC2_USERNAME }}
-
           key: ${{ secrets.EC2_SSH_KEY }}
-
           source: "exam-backend-image.tar"
-
           target: "/home/ubuntu/exam-portal-backend/"
  
       - name: Deploy with Health Check & Rollback
-
         uses: appleboy/ssh-action@v1.0.3
-
         with:
-
           host: ${{ secrets.EC2_HOST }}
-
           username: ${{ secrets.EC2_USERNAME }}
-
           key: ${{ secrets.EC2_SSH_KEY }}
-
           # Pass runtime env vars for the container as GitHub Secrets, e.g.:
-
           # envs: DATABASE_URL,JWT_SECRET
-
-          script: |
-            echo "=========================================="
-            echo "Loading Docker image..."
-            echo "=========================================="
-            docker load -i exam-backend-image.tar
-            echo ""
-            echo "=========================================="
-            echo "Testing new container on port 8081..."
-            echo "=========================================="
-            docker run -d \
-              --name test-container-backend \
-              --env-file /home/ubuntu/exam-portal-backend/.env \
-              -p 8081:5000 \
-              exam-backend:new
-
-  sleep 10
-
-  if curl -f http://localhost:8081/; then
-
-    echo "Health check PASSED - Deploying..."
-
-    docker stop test-container-backend
-
-    docker rm test-container-backend
-
-    if docker ps -a --format '{{.Names}}' | grep -q "^exam-backend-prod$"; then
-
-      echo "Backing up current production..."
-
-      docker tag exam-backend-prod exam-backend-prod:backup
-
-      docker stop exam-backend-prod
-
-      docker rm exam-backend-prod
-
-    fi
-
-    echo "Starting new production container..."
-
-    docker run -d \
-
-      --name exam-backend-prod \
-
-      --restart always \
-
-      --env-file /home/ubuntu/exam-portal-backend/.env \
-
-      -p 5000:5000 \
-
-      exam-backend:new
-
-    sleep 5
-
-    if curl -f http://localhost:5000/; then
-
-      echo ""
-
-      echo "=========================================="
-
-      echo "DEPLOYMENT SUCCESSFUL!"
-
-      echo "=========================================="
-
-      echo "Backend reachable via:"
-
-      echo "http://kts-exam-backend.duckdns.org:5000"
-
-      docker ps | grep exam-backend-prod
-
-    else
-
-      echo "New container failed! Rolling back..."
-
-      docker stop exam-backend-prod
-
-      docker rm exam-backend-prod
-
-      docker run -d \
-
-        --name exam-backend-prod \
-
-        --restart always \
-
-        --env-file /home/ubuntu/exam-portal-backend/.env \
-
-        -p 5000:5000 \
-
-        exam-backend-prod:backup
-
-      echo "Rollback complete - Previous version restored"
-
-    fi
-
-  else
-
-    echo ""
-
-    echo "=========================================="
-
-    echo "Health check FAILED - Not deploying!"
-
-    echo "=========================================="
-
-    echo "Keeping existing production container running"
-
-    echo ""
-
-    echo "Test container logs:"
-
-    docker logs test-container-backend --tail 20
-
-    docker stop test-container-backend
-
-    docker rm test-container-backend
-
-    exit 1
-
-  fi
-
-  rm -f exam-backend-image.tar
-
-  echo ""
-
-  echo "=========================================="
-
-  echo "Final Status:"
-
-  echo "=========================================="
-
-  docker ps
-
-  echo ""
-
-  echo "=========================================="
-
-  echo "Recent Logs:"
-
-  echo "=========================================="
-
-  docker logs exam-backend-prod --tail 20
- 
+          
