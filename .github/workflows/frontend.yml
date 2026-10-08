@@ -1,0 +1,168 @@
+name: Frontend CI/CD (Vite + Docker + EC2)
+
+on:
+  push:
+    branches:
+      - Frontend
+  workflow_dispatch:
+
+jobs:
+  # ========== CI JOB (Testing/Build) ==========
+  ci:
+    runs-on: ubuntu-latest
+ 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+ 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+ 
+      - name: Install dependencies
+        run: npm install
+ 
+      - name: Debug client.js
+        run: |
+          echo "===== COMMIT ====="
+          git rev-parse HEAD
+ 
+          echo "===== client.js lines 1-10 ====="
+          nl -ba src/api/client.js | head -10
+ 
+          echo "===== SEARCH FOR CONFLICT MARKERS ====="
+          git grep -n -E '<<<<<<<|=======|>>>>>>>' || true
+ 
+      - name: Build frontend
+        run: npm run build
+
+  # ========== DOCKER BUILD JOB ==========
+  docker:
+    runs-on: ubuntu-latest
+    needs: ci
+    if: success()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t exam-frontend:new .
+          docker save exam-frontend:new -o exam-frontend-image.tar
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-frontend
+          path: exam-frontend-image.tar
+
+  # ========== DEPLOY TO EC2 ==========
+  deploy:
+    runs-on: ubuntu-latest
+    needs: docker
+    if: success()
+    steps:
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-frontend
+          path: ./
+
+      - name: Copy Docker image to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "exam-frontend-image.tar"
+          target: "/home/ubuntu/exam-portal-frontend/"
+
+      - name: Deploy with Health Check & Rollback
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/exam-portal-frontend/
+            echo "=========================================="
+            echo "Loading Docker image..."
+            echo "=========================================="
+            docker load -i exam-frontend-image.tar
+            echo ""
+            echo "=========================================="
+            echo "Testing new container on port 8080..."
+            echo "=========================================="
+            # Run test container on a temporary port
+            docker run -d \
+              --name test-container-frontend \
+              -p 8080:80 \
+              exam-frontend:new
+            sleep 10
+            # Health check (root path served by nginx from the built dist/)
+            if curl -f http://localhost:8080/; then
+              echo "Health check PASSED - Deploying..."
+              docker stop test-container-frontend
+              docker rm test-container-frontend
+              # Backup existing production container
+              if docker ps -a --format '{{.Names}}' | grep -q "^exam-frontend-prod$"; then
+                echo "Backing up current production..."
+                docker tag exam-frontend-prod exam-frontend-prod:backup
+                docker stop exam-frontend-prod
+                docker rm exam-frontend-prod
+              fi
+              # Run new production container
+              echo "Starting new production container..."
+              docker run -d \
+                --name exam-frontend-prod \
+                --restart always \
+                -p 80:80 \
+                exam-frontend:new
+              sleep 5
+              # Final health check
+              if curl -f http://localhost:80/; then
+                echo ""
+                echo "=========================================="
+                echo "DEPLOYMENT SUCCESSFUL!"
+                echo "=========================================="
+                echo "Frontend reachable via:"
+                echo "http://kts-exam.duckdns.org"
+                docker ps | grep exam-frontend-prod
+              else
+                echo "New container failed! Rolling back..."
+                docker stop exam-frontend-prod
+                docker rm exam-frontend-prod
+                docker run -d \
+                  --name exam-frontend-prod \
+                  --restart always \
+                  -p 80:80 \
+                  exam-frontend-prod:backup
+                echo "Rollback complete - Previous version restored"
+              fi
+            else
+              echo ""
+              echo "=========================================="
+              echo "Health check FAILED - Not deploying!"
+              echo "=========================================="
+              echo "Keeping existing production container running"
+              echo ""
+              echo "Test container logs:"
+              docker logs test-container-frontend --tail 20
+              docker stop test-container-frontend
+              docker rm test-container-frontend
+              exit 1
+            fi
+            # Cleanup
+            rm -f exam-frontend-image.tar
+            echo ""
+            echo "=========================================="
+            echo "Final Status:"
+            echo "=========================================="
+            docker ps
+            echo ""
+            echo "=========================================="
+            echo "Recent Logs:"
+            echo "=========================================="
+            docker logs exam-frontend-prod --tail 20

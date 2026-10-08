@@ -1,36 +1,37 @@
-# ---- Build stage ----
-FROM node:22-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-RUN apk update && apk upgrade --no-cache
-
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+COPY package*.json ./
+RUN npm install
 
 COPY . .
+RUN npm run build
 
-# ---- Runtime stage ----
-FROM node:22-alpine AS runtime
+FROM nginx:alpine
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
+# Build stage
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
-RUN apk update && apk upgrade --no-cache \
-    && rm -rf /usr/local/lib/node_modules/npm \
-    && rm -f /usr/local/bin/npm /usr/local/bin/npx
+COPY package*.json ./
+RUN npm install
 
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/server.js ./server.js
-COPY --from=builder /app/routes ./routes
-COPY --from=builder /app/utils ./utils
-COPY --from=builder /app/data ./data
+COPY . .
+RUN npm run build
 
-# Alpine already ships a low-privilege 'node' user in the official
-# node:*-alpine images — reuse it instead of creating a new one.
-RUN chown -R node:node /app
-USER node
 
-EXPOSE 5000
+# NGINX stage
+FROM nginx:alpine
 
-CMD ["node", "server.js"]
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
