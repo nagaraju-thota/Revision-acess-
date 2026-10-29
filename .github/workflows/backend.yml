@@ -31,6 +31,7 @@ env:
   APP_NAME: backend-my-app             # image will be <APP_NAME>-<COMPONENT>
   NEXUS_REPO: backend-trivy-reports  # name of this component's repository in Nexus (raw, hosted)
   SONAR_PROJECT_KEY: backend-project   # exact project key of this component in SonarQube
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}   # add as a repo secret
 
 permissions:
   contents: write              # update-manifest commits the new image tag
