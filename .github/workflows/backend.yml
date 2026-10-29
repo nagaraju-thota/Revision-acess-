@@ -1,130 +1,297 @@
-name: Trivy Security Scan
+# Frontend DevSecOps pipeline (standalone).
+# The only things that differ from backend-pipeline.yml are the values in the env block
+# (COMPONENT, APP_PORT, HEALTH_PATH) and the paths filter below.
+#
+# Required repo secrets:
+#   SONAR_TOKEN, SONAR_HOST_URL      - local SonarQube (ngrok URL)
+#   NEXUS_URL                        - local Nexus ngrok URL (no trailing slash)
+#   NEXUS_USERNAME, NEXUS_PASSWORD   - Nexus user allowed to upload to the raw repo
+#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+# GHCR uses the built-in GITHUB_TOKEN.
+#
+# Nexus: create a "raw (hosted)" repository named "trivy-reports". Reports land at:
+#   trivy-reports/${COMPONENT}/file-scan/build-<run>-<sha>.txt
+#   trivy-reports/${COMPONENT}/dependency-scan/build-<run>-<sha>.txt
+#   trivy-reports/${COMPONENT}/image-scan/build-<run>-<sha>.txt
+
+name: Frontend DevSecOps Pipeline
 
 on:
   push:
-    branches:
-      - new-backend
-  workflow_dispatch: 
+  workflow_dispatch:
 
 env:
-  BUILD_ID: build-${{ github.run_number }}
+  COMPONENT: frontend          # frontend or backend -> folder in repo AND folder in Nexus
+  APP_PORT: "3000"
+  HEALTH_PATH: /
+  APP_NAME: fontend-my-app             # image will be <APP_NAME>-<COMPONENT>
+  NEXUS_REPO: my-app-trivy_reports
+
+permissions:
+  contents: write              # update-manifest commits the new image tag
+  packages: write              # push to GHCR
 
 jobs:
-  trivy:
+  # ---------------------------------------------------------------
+  # 1. BUILD + HEALTH CHECK
+  # ---------------------------------------------------------------
+  build-and-health-check:
+    name: Build & Health Check
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ env.COMPONENT }}/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        working-directory: ./${{ env.COMPONENT }}
+        run: npm ci
 
-      - name: Build Docker Image
-        run: |
-          docker build -t demo:${{ github.sha }} .
+      - name: Build
+        working-directory: ./${{ env.COMPONENT }}
+        run: npm run build --if-present
 
-      - name: Install Trivy
+      - name: Start app and run health check
+        working-directory: ./${{ env.COMPONENT }}
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
-            sh -s -- -b /usr/local/bin
-          trivy --version
-
-      # ---------------------------------------------------------------
-      
-       # 1. CONFIG SCAN - DOCKERFILE ONLY (no k8s manifests in this repo)
-      # ---------------------------------------------------------------
-      - name: Trivy Config Scan - Dockerfile
-        id: config_scan_dockerfile
-        run: |
-          trivy config . \
-            --file-patterns dockerfile:Dockerfile \
-            --severity HIGH,CRITICAL \
-            --exit-code 1 \
-            --format table \
-            --output trivy-config-dockerfile-report.txt
-        continue-on-error: true
-      # ---------------------------------------------------------------
-      # 2. FILESYSTEM SCAN - VULNERABILITIES
-      # ---------------------------------------------------------------
-      - name: Trivy Filesystem Scan - Vulnerabilities
-        id: fs_vuln_scan
-        run: |
-          trivy fs . \
-            --scanners vuln \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
-            --exit-code 1 \
-            --format table \
-            --output trivy-fs-vulnerability-report.txt
-        continue-on-error: true
-
-      # ---------------------------------------------------------------
-      # 3. FILESYSTEM SCAN - SECRETS
-      # ---------------------------------------------------------------
-      - name: Trivy Filesystem Scan - Secrets
-        id: fs_secret_scan
-        run: |
-          trivy fs . \
-            --scanners secret \
-            --exit-code 1 \
-            --format table \
-            --output trivy-fs-secret-report.txt
-        continue-on-error: true
-
-      # ---------------------------------------------------------------
- # 4. IMAGE SCAN
-      # ---------------------------------------------------------------
-      - name: Trivy Image Scan
-        id: image_scan
-        run: |
-          trivy image demo:${{ github.sha }} \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
-            --exit-code 1 \
-            --format table \
-            --output trivy-image-report.txt
-        continue-on-error: true
-      # ---------------------------------------------------------------
-      # UPLOADS TO NEXUS (revision-access-trivy-reports)
-      # ---------------------------------------------------------------
-      - name: Upload Image Scan report to Nexus
-        run: |
-          curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
-            --upload-file trivy-image-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/image-scan/${{ env.BUILD_ID }}/trivy-image-report.txt"
-
-      - name: Upload Filesystem Vulnerability report to Nexus
-        run: |
-          curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
-            --upload-file trivy-fs-vulnerability-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/filesystem-scan/vulnerabilities/${{ env.BUILD_ID }}/trivy-fs-vulnerability-report.txt"
-
-      - name: Upload Filesystem Secret report to Nexus
-        run: |
-          curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
-            --upload-file trivy-fs-secret-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/filesystem-scan/secrets/${{ env.BUILD_ID }}/trivy-fs-secret-report.txt"
-
-      - name: Upload Config Scan report to Nexus (Dockerfile)
-        run: |
-          curl -v -u "${{ secrets.NEXUS_USER }}:${{ secrets.NEXUS_PASS }}" \
-            --upload-file trivy-config-dockerfile-report.txt \
-            "${{ secrets.NEXUS_URL }}/repository/revison-access-trivy-reports/config-scan/dockerfile/${{ env.BUILD_ID }}/trivy-config-dockerfile-report.txt"
-
-      # ---------------------------------------------------------------
-      # GATE: fail the job if ANY scan found issues (after all uploads)
-      # ---------------------------------------------------------------
-      - name: Fail job if any scan found issues
-        if: |
-          steps.image_scan.outcome == 'failure' ||
-          steps.fs_vuln_scan.outcome == 'failure' ||
-          steps.fs_secret_scan.outcome == 'failure' ||
-          steps.config_scan_dockerfile.outcome == 'failure'
-        run: |
-          echo "❌ One or more Trivy scans found issues. See uploaded reports in Nexus under ${{ env.BUILD_ID }}."
+          npm start &
+          APP_PID=$!
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${APP_PORT}${HEALTH_PATH}" || true)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed"
+              kill $APP_PID
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check FAILED"
+          kill $APP_PID || true
           exit 1
 
-      - name: Deploy
-        if: success()
-        run: echo "Add your deployment step here"
+  # ---------------------------------------------------------------
+  # 2. UNIT TESTS + CODE COVERAGE
+  # ---------------------------------------------------------------
+  unit-test:
+    name: Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    needs: build-and-health-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ env.COMPONENT }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./${{ env.COMPONENT }}
+        run: npm ci
+
+      - name: Run tests with coverage
+        working-directory: ./${{ env.COMPONENT }}
+        run: npm test -- --coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ env.COMPONENT }}
+          path: ${{ env.COMPONENT }}/coverage/
+
+  # ---------------------------------------------------------------
+  # 3. SONARQUBE STATIC ANALYSIS + QUALITY GATE
+  # ---------------------------------------------------------------
+  sonarqube:
+    name: SonarQube Analysis & Quality Gate
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-${{ env.COMPONENT }}
+          path: ${{ env.COMPONENT }}/coverage/
+
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v5.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          projectBaseDir: ${{ env.COMPONENT }}
+          args: >
+            -Dsonar.projectKey=${{ github.event.repository.name }}-${{ env.COMPONENT }}
+            -Dsonar.sources=.
+            -Dsonar.exclusions=node_modules/**,coverage/**,**/*.test.js
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+      - name: Quality Gate check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        with:
+          scanMetadataReportFile: ${{ env.COMPONENT }}/.scannerwork/report-task.txt
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # ---------------------------------------------------------------
+  # 4. TRIVY FILE + DEPENDENCY SCAN -> NEXUS
+  # ---------------------------------------------------------------
+  trivy-fs-scan:
+    name: Trivy File & Dependency Scan
+    runs-on: ubuntu-latest
+    needs: sonarqube
+    steps:
+      - uses: actions/checkout@v4
+
+      # Dependency report: vulnerabilities in package manifests / lock files
+      - name: Trivy dependency scan (report)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: ./${{ env.COMPONENT }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          output: dependency-report.txt
+          exit-code: "0"
+
+      # File scan report: secrets + misconfigurations
+      - name: Trivy file scan (report)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: ./${{ env.COMPONENT }}
+          scanners: secret,misconfig
+          severity: HIGH,CRITICAL
+          format: table
+          output: file-scan-report.txt
+          exit-code: "0"
+
+      - name: Upload reports to Nexus
+        if: always()
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          BASE="${NEXUS_URL}/repository/${NEXUS_REPO}/${COMPONENT}"
+          NAME="build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
+          upload() {  # $1 = local file, $2 = Nexus folder
+            curl --fail --silent --show-error \
+              -H "ngrok-skip-browser-warning: true" \
+              -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+              --upload-file "$1" "${BASE}/$2/${NAME}" \
+              && echo "Uploaded $1 -> ${BASE}/$2/${NAME}"
+          }
+          upload file-scan-report.txt   file-scan
+          upload dependency-report.txt  dependency-scan
+
+      # Gate runs AFTER the upload, so reports are stored even when it fails
+      - name: Trivy gate (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: ./${{ env.COMPONENT }}
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  # ---------------------------------------------------------------
+  # 5. DOCKER BUILD -> TRIVY IMAGE SCAN -> NEXUS -> GATE -> PUSH
+  # ---------------------------------------------------------------
+  docker-build-scan-push:
+    name: Docker Build, Image Scan & Push
+    runs-on: ubuntu-latest
+    needs: trivy-fs-scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image variables
+        id: vars
+        run: |
+          echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "image=${APP_NAME}-${COMPONENT}" >> $GITHUB_OUTPUT
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ env.COMPONENT }}
+          load: true
+          push: false
+          tags: ${{ steps.vars.outputs.image }}:scan
+
+      - name: Trivy image scan (report)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.vars.outputs.image }}:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          output: image-scan-report.txt
+          exit-code: "0"
+
+      - name: Upload image report to Nexus
+        if: always()
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          TARGET="${NEXUS_URL}/repository/${NEXUS_REPO}/${COMPONENT}/image-scan/build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
+          curl --fail --silent --show-error \
+            -H "ngrok-skip-browser-warning: true" \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            --upload-file image-scan-report.txt "${TARGET}"
+          echo "Uploaded image-scan-report.txt -> ${TARGET}"
+
+      # VULNERABILITY GATE: blocks the push on HIGH/CRITICAL
+      - name: Vulnerability gate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.vars.outputs.image }}:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Login to Docker Hub
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to Docker Hub and GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ env.COMPONENT }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.vars.outputs.image }}:latest
+            ghcr.io/${{ steps.vars.outputs.owner }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
+            ghcr.io/${{ steps.vars.outputs.owner }}/${{ steps.vars.outputs.image }}:latest
