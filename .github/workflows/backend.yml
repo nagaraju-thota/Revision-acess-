@@ -1,6 +1,6 @@
-# Frontend DevSecOps pipeline (standalone).
-# The only things that differ from backend-pipeline.yml are the values in the env block
-# (COMPONENT, APP_PORT, HEALTH_PATH) and the paths filter below.
+# Backend DevSecOps pipeline (standalone).
+# The only things that differ from frontend-pipeline.yml are the values in the env block
+# (COMPONENT, APP_PORT, HEALTH_PATH, NEXUS_REPO, SONAR_PROJECT_KEY) and the paths filter below.
 #
 # Required repo secrets:
 #   SONAR_TOKEN, SONAR_HOST_URL      - local SonarQube (ngrok URL)
@@ -9,23 +9,24 @@
 #   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
 # GHCR uses the built-in GITHUB_TOKEN.
 #
-# Nexus: create a "raw (hosted)" repository named "trivy-reports". Reports land at:
-#   trivy-reports/${COMPONENT}/file-scan/build-<run>-<sha>.txt
-#   trivy-reports/${COMPONENT}/dependency-scan/build-<run>-<sha>.txt
-#   trivy-reports/${COMPONENT}/image-scan/build-<run>-<sha>.txt
+# Nexus: each pipeline has its OWN "raw (hosted)" repository (NEXUS_REPO below):
+#   frontend pipeline -> frontend-reports, backend pipeline -> backend-reports
+# Reports land at:
+#   <NEXUS_REPO>/file-scan/build-<run>-<sha>.txt
+#   <NEXUS_REPO>/dependency-scan/build-<run>-<sha>.txt
+#   <NEXUS_REPO>/image-scan/build-<run>-<sha>.txt
 
-name: Frontend DevSecOps Pipeline
-
+name: Backend DevSecOps Pipeline
 on:
-  push:
   workflow_dispatch:
 
 env:
-  COMPONENT: trivy-scan-reports         # frontend or backend -> folder in repo AND folder in Nexus
+  COMPONENT: backend           # frontend or backend -> folder in the GitHub repo
   APP_PORT: "5000"
-  HEALTH_PATH: /
-  APP_NAME: fontend-my-app             # image will be <APP_NAME>-<COMPONENT>
-  NEXUS_REPO: my-app-trivy_reports
+  HEALTH_PATH: /api/health
+  APP_NAME: backend-my-app             # image will be <APP_NAME>-<COMPONENT>
+  NEXUS_REPO: backend-trivy-reports  # name of this component's repository in Nexus (raw, hosted)
+  SONAR_PROJECT_KEY: backend-project   # exact project key of this component in SonarQube
 
 permissions:
   contents: write              # update-manifest commits the new image tag
@@ -130,7 +131,7 @@ jobs:
         with:
           projectBaseDir: ${{ env.COMPONENT }}
           args: >
-            -Dsonar.projectKey=${{ github.event.repository.name }}-${{ env.COMPONENT }}
+            -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
             -Dsonar.sources=.
             -Dsonar.exclusions=node_modules/**,coverage/**,**/*.test.js
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
@@ -186,7 +187,7 @@ jobs:
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         run: |
-          BASE="${NEXUS_URL}/repository/${NEXUS_REPO}/${COMPONENT}"
+          BASE="${NEXUS_URL}/repository/${NEXUS_REPO}"
           NAME="build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
           upload() {  # $1 = local file, $2 = Nexus folder
             curl --fail --silent --show-error \
@@ -253,7 +254,7 @@ jobs:
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         run: |
-          TARGET="${NEXUS_URL}/repository/${NEXUS_REPO}/${COMPONENT}/image-scan/build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
+          TARGET="${NEXUS_URL}/repository/${NEXUS_REPO}/image-scan/build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
           curl --fail --silent --show-error \
             -H "ngrok-skip-browser-warning: true" \
             -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
