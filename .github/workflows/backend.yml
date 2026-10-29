@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
 
 env:
-  COMPONENT: frontend          # frontend or backend -> folder in repo AND folder in Nexus
+  COMPONENT: trivy-scan-reports         # frontend or backend -> folder in repo AND folder in Nexus
   APP_PORT: "5000"
   HEALTH_PATH: /
   APP_NAME: fontend-my-app             # image will be <APP_NAME>-<COMPONENT>
