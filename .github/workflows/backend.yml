@@ -1,6 +1,7 @@
 # Backend DevSecOps pipeline (standalone).
 # The only things that differ from frontend-pipeline.yml are the values in the env block
-# (COMPONENT, APP_PORT, HEALTH_PATH, NEXUS_REPO, SONAR_PROJECT_KEY) and the paths filter below.
+# (COMPONENT, APP_PORT, HEALTH_PATH, NEXUS_REPO, SONAR_PROJECT_KEY) and the workflow name.
+# Each component lives in its OWN GitHub repo, so put each file in its own repo.
 #
 # Required repo secrets:
 #   SONAR_TOKEN, SONAR_HOST_URL      - local SonarQube (ngrok URL)
@@ -17,13 +18,16 @@
 #   <NEXUS_REPO>/image-scan/build-<run>-<sha>.txt
 
 name: Backend DevSecOps Pipeline
+
 on:
   workflow_dispatch:
 
 env:
-  COMPONENT: backend           # frontend or backend -> folder in the GitHub repo
+  COMPONENT: backend           # label only: frontend or backend -> used in image name
   APP_PORT: "5000"
   HEALTH_PATH: /api/health
+  APP_DIR: .                   # folder with package.json + Dockerfile (. = repo root)
+  MANIFEST_FILE: k8s/deployment.yaml  # file whose image tag is updated (skipped if missing)
   APP_NAME: backend-my-app             # image will be <APP_NAME>-<COMPONENT>
   NEXUS_REPO: backend-trivy-reports  # name of this component's repository in Nexus (raw, hosted)
   SONAR_PROJECT_KEY: backend-project   # exact project key of this component in SonarQube
@@ -45,19 +49,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: ${{ env.COMPONENT }}/package-lock.json
 
       - name: Install dependencies
-        working-directory: ./${{ env.COMPONENT }}
-        run: npm ci
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          ls -la
+          if [ -f package-lock.json ]; then npm ci; else echo "No package-lock.json, using npm install"; npm install; fi
 
       - name: Build
-        working-directory: ./${{ env.COMPONENT }}
+        working-directory: ${{ env.APP_DIR }}
         run: npm run build --if-present
 
       - name: Start app and run health check
-        working-directory: ./${{ env.COMPONENT }}
+        working-directory: ${{ env.APP_DIR }}
         run: |
           npm start &
           APP_PID=$!
@@ -88,22 +92,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: ${{ env.COMPONENT }}/package-lock.json
 
       - name: Install dependencies
-        working-directory: ./${{ env.COMPONENT }}
-        run: npm ci
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          ls -la
+          if [ -f package-lock.json ]; then npm ci; else echo "No package-lock.json, using npm install"; npm install; fi
 
       - name: Run tests with coverage
-        working-directory: ./${{ env.COMPONENT }}
+        working-directory: ${{ env.APP_DIR }}
         run: npm test -- --coverage
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ env.COMPONENT }}
-          path: ${{ env.COMPONENT }}/coverage/
+          path: ${{ env.APP_DIR }}/coverage/
 
   # ---------------------------------------------------------------
   # 3. SONARQUBE STATIC ANALYSIS + QUALITY GATE
@@ -121,7 +125,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: coverage-${{ env.COMPONENT }}
-          path: ${{ env.COMPONENT }}/coverage/
+          path: ${{ env.APP_DIR }}/coverage/
 
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v5.0.0
@@ -129,7 +133,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
-          projectBaseDir: ${{ env.COMPONENT }}
+          projectBaseDir: ${{ env.APP_DIR }}
           args: >
             -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
             -Dsonar.sources=.
@@ -140,7 +144,7 @@ jobs:
         uses: SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
         with:
-          scanMetadataReportFile: ${{ env.COMPONENT }}/.scannerwork/report-task.txt
+          scanMetadataReportFile: ${{ env.APP_DIR }}/.scannerwork/report-task.txt
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -160,7 +164,7 @@ jobs:
         uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
-          scan-ref: ./${{ env.COMPONENT }}
+          scan-ref: ${{ env.APP_DIR }}
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -173,7 +177,7 @@ jobs:
         uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
-          scan-ref: ./${{ env.COMPONENT }}
+          scan-ref: ${{ env.APP_DIR }}
           scanners: secret,misconfig
           severity: HIGH,CRITICAL
           format: table
@@ -204,7 +208,7 @@ jobs:
         uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
-          scan-ref: ./${{ env.COMPONENT }}
+          scan-ref: ${{ env.APP_DIR }}
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -232,7 +236,7 @@ jobs:
       - name: Build image (not pushed yet)
         uses: docker/build-push-action@v6
         with:
-          context: ./${{ env.COMPONENT }}
+          context: ${{ env.APP_DIR }}
           load: true
           push: false
           tags: ${{ steps.vars.outputs.image }}:scan
@@ -289,7 +293,7 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
-          context: ./${{ env.COMPONENT }}
+          context: ${{ env.APP_DIR }}
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
