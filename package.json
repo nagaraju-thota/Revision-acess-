@@ -10,7 +10,22 @@
   },
   "jest": {
     "testEnvironment": "node",
-    "coverageReporters": ["lcov", "text"]
+    "setupFiles": [
+      "<rootDir>/tests/setup-env.js"
+    ],
+    "testMatch": [
+      "<rootDir>/tests/**/*.test.js"
+    ],
+    "collectCoverageFrom": [
+      "server.js",
+      "data/db.js",
+      "routes/**/*.js",
+      "utils/**/*.js"
+    ],
+    "coverageReporters": [
+      "lcov",
+      "text"
+    ]
   },
   "dependencies": {
     "cors": "^2.8.5",
