@@ -183,7 +183,7 @@ jobs:
 
       # File scan report: secrets + misconfigurations
       - name: Trivy file scan (report)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
           scan-ref: ${{ env.APP_DIR }}
@@ -214,7 +214,7 @@ jobs:
 
       # Gate runs AFTER the upload, so reports are stored even when it fails
       - name: Trivy gate (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
           scan-ref: ${{ env.APP_DIR }}
@@ -251,7 +251,7 @@ jobs:
           tags: ${{ steps.vars.outputs.image }}:scan
 
       - name: Trivy image scan (report)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ steps.vars.outputs.image }}:scan
           severity: HIGH,CRITICAL
@@ -276,7 +276,7 @@ jobs:
 
       # VULNERABILITY GATE: blocks the push on HIGH/CRITICAL
       - name: Vulnerability gate
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ steps.vars.outputs.image }}:scan
           severity: HIGH,CRITICAL
