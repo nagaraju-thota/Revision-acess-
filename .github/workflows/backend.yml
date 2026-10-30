@@ -197,17 +197,25 @@ jobs:
         if: always()
         env:
           NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_REPO: ${{ env.NEXUS_REPO }}     # or ${{ vars.NEXUS_REPO }} / secrets, wherever you keep it
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         run: |
-          BASE="${NEXUS_URL}/repository/${NEXUS_REPO}"
+          : "${NEXUS_URL:?NEXUS_URL is empty}"
+          : "${NEXUS_REPO:?NEXUS_REPO is empty}"
+          BASE="${NEXUS_URL%/}/repository/${NEXUS_REPO}"
           NAME="build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
           upload() {  # $1 = local file, $2 = Nexus folder
-            curl --fail --silent --show-error \
-              -H "ngrok-skip-browser-warning: true" \
+            URL="${BASE}/$2/${NAME}"
+            code=$(curl -sS -o /tmp/nexus.out -w '%{http_code}' \
               -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-              --upload-file "$1" "${BASE}/$2/${NAME}" \
-              && echo "Uploaded $1 -> ${BASE}/$2/${NAME}"
+              --upload-file "$1" "$URL")
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+              echo "Uploaded $1 -> $URL"
+            else
+              echo "FAILED (HTTP $code) -> $URL"; head -c 500 /tmp/nexus.out; echo
+              return 1
+            fi
           }
           upload file-scan-report.txt   file-scan
           upload dependency-report.txt  dependency-scan
