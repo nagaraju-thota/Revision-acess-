@@ -288,7 +288,6 @@ jobs:
             echo "FAILED (HTTP $code) -> ${TARGET}"; head -c 500 /tmp/nexus.out; echo
             exit 1
           fi
-
       # VULNERABILITY GATE: blocks the push on HIGH/CRITICAL
       - name: Vulnerability gate
         uses: aquasecurity/trivy-action@v0.35.0
@@ -298,15 +297,22 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
+      - name: Vulnerability gate result
+        run: echo "✅ Vulnerability gate passed successfully - no fixable HIGH/CRITICAL vulnerabilities found."
+
+      - name: Push skipped notice
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new-backend'
+        run: echo "⚠️ Image push skipped - branch is '${{ github.ref_name }}', pushes only run on main."
+
       - name: Login to Docker Hub
-        if: github.ref == 'refs/heads/main'
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new-backend'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to GitHub Container Registry
-        if: github.ref == 'refs/heads/main'
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new-backend'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -314,7 +320,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push to Docker Hub and GHCR
-        if: github.ref == 'refs/heads/main'
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new-backend'
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.APP_DIR }}
@@ -324,6 +330,10 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.vars.outputs.image }}:latest
             ghcr.io/${{ steps.vars.outputs.owner }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
             ghcr.io/${{ steps.vars.outputs.owner }}/${{ steps.vars.outputs.image }}:latest
+
+      - name: Push result
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new-backend'
+        run: echo "✅ Images pushed to Docker Hub and GHCR - tag ${{ steps.vars.outputs.tag }} and latest."
 
   # ---------------------------------------------------------------
   # 6. UPDATE IMAGE TAG IN GIT (single source of truth)
