@@ -272,15 +272,22 @@ jobs:
         if: always()
         env:
           NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_REPO: ${{ env.NEXUS_REPO }}     # or ${{ vars.NEXUS_REPO }} / ${{ secrets.NEXUS_REPO }}
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         run: |
-          TARGET="${NEXUS_URL}/repository/${NEXUS_REPO}/image-scan/build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
-          curl --fail --silent --show-error \
-            -H "ngrok-skip-browser-warning: true" \
+          : "${NEXUS_URL:?NEXUS_URL is empty}"
+          : "${NEXUS_REPO:?NEXUS_REPO is empty}"
+          TARGET="${NEXUS_URL%/}/repository/${NEXUS_REPO}/image-scan/build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
+          code=$(curl -sS -o /tmp/nexus.out -w '%{http_code}' \
             -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
-            --upload-file image-scan-report.txt "${TARGET}"
-          echo "Uploaded image-scan-report.txt -> ${TARGET}"
+            --upload-file image-scan-report.txt "${TARGET}")
+          if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+            echo "Uploaded image-scan-report.txt -> ${TARGET}"
+          else
+            echo "FAILED (HTTP $code) -> ${TARGET}"; head -c 500 /tmp/nexus.out; echo
+            exit 1
+          fi
 
       # VULNERABILITY GATE: blocks the push on HIGH/CRITICAL
       - name: Vulnerability gate
