@@ -1,168 +1,361 @@
-name: Frontend CI/CD (Vite + Docker + EC2)
+# Frontend DevSecOps pipeline (standalone).
+# The only things that differ from backend-pipeline.yml are the values in the env block
+# (COMPONENT, APP_PORT, HEALTH_PATH, NEXUS_REPO, SONAR_PROJECT_KEY) and the workflow name.
+# Each component lives in its OWN GitHub repo, so put each file in its own repo.
+#
+# Required repo secrets:
+#   SONAR_TOKEN, SONAR_HOST_URL      - local SonarQube (forwarded URL)
+#   NEXUS_URL                        - local Nexus forwarded URL (no trailing slash)
+#   NEXUS_USERNAME, NEXUS_PASSWORD   - Nexus user allowed to upload to the raw repo
+#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+#   VITE_API_URL                     - backend base URL, with /api (baked into the frontend at build time)
+# GHCR uses the built-in GITHUB_TOKEN.
+#
+# Nexus: each pipeline has its OWN "raw (hosted)" repository (NEXUS_REPO below):
+#   frontend pipeline -> frontend-trivy-reports, backend pipeline -> backend-trivy-reports
+# Reports land at:
+#   <NEXUS_REPO>/file-scan/build-<run>-<sha>.txt
+#   <NEXUS_REPO>/dependency-scan/build-<run>-<sha>.txt
+#   <NEXUS_REPO>/image-scan/build-<run>-<sha>.txt
+
+name: Frontend DevSecOps Pipeline
 
 on:
-  push:
-    branches:
-      - Frontend
   workflow_dispatch:
 
+env:
+  COMPONENT: frontend          # label only: frontend or backend -> used in image name
+  APP_PORT: "4173"             # "npm start" = vite preview (serves the built dist/ on 4173)
+  HEALTH_PATH: /               # frontend has no /api/health, the home page returning 200 is enough
+  APP_DIR: .                   # folder with package.json + Dockerfile (. = repo root)
+  MANIFEST_FILE: k8s/deployment.yaml  # file whose image tag is updated (skipped if missing)
+  APP_NAME: frontend-my-app            # image will be <APP_NAME>-<COMPONENT>
+  NEXUS_REPO: frontend-trivy-reports # name of this component's repository in Nexus (raw, hosted)
+  SONAR_PROJECT_KEY: frontend-project  # exact project key of this component in SonarQube
+  # Backend URL baked into the bundle at BUILD time (Vite reads it then, not at runtime).
+  # Use "/api" when nginx/Ingress forwards /api to the backend, or a full URL like https://api.example.com/api
+  VITE_API_URL: ${{ secrets.VITE_API_URL }}   # add as a repo secret
+
+permissions:
+  contents: write              # update-manifest commits the new image tag
+  packages: write              # push to GHCR
+
 jobs:
-  # ========== CI JOB (Testing/Build) ==========
-  ci:
+  # ---------------------------------------------------------------
+  # 1. BUILD + HEALTH CHECK
+  # ---------------------------------------------------------------
+  build-and-health-check:
+    name: Build & Health Check
     runs-on: ubuntu-latest
- 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
- 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "18"
-          cache: "npm"
- 
+          node-version: 20
+
       - name: Install dependencies
-        run: npm install
- 
-      - name: Debug client.js
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          echo "===== COMMIT ====="
-          git rev-parse HEAD
- 
-          echo "===== client.js lines 1-10 ====="
-          nl -ba src/api/client.js | head -10
- 
-          echo "===== SEARCH FOR CONFLICT MARKERS ====="
-          git grep -n -E '<<<<<<<|=======|>>>>>>>' || true
- 
-      - name: Build frontend
-        run: npm run build
+          ls -la
+          if [ -f package-lock.json ]; then npm ci; else echo "No package-lock.json, using npm install"; npm install; fi
 
-  # ========== DOCKER BUILD JOB ==========
-  docker:
+      - name: Build
+        working-directory: ${{ env.APP_DIR }}
+        run: npm run build --if-present
+
+      - name: Start app and run health check
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          npm start &
+          APP_PID=$!
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${APP_PORT}${HEALTH_PATH}" || true)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed"
+              kill $APP_PID
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check FAILED"
+          kill $APP_PID || true
+          exit 1
+
+  # ---------------------------------------------------------------
+  # 2. UNIT TESTS + CODE COVERAGE
+  # ---------------------------------------------------------------
+  unit-test:
+    name: Unit Tests & Coverage
     runs-on: ubuntu-latest
-    needs: ci
-    if: success()
+    needs: build-and-health-check
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build Docker image
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          docker build -t exam-frontend:new .
-          docker save exam-frontend:new -o exam-frontend-image.tar
+          ls -la
+          if [ -f package-lock.json ]; then npm ci; else echo "No package-lock.json, using npm install"; npm install; fi
 
-      - name: Upload Docker image artifact
+      - name: Run tests with coverage
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if node -e "process.exit((require('./package.json').scripts||{})['test:coverage']?0:1)"; then
+            npm run test:coverage
+          else
+            echo "::warning::No test script in package.json - skipping unit tests, no coverage will be sent to SonarQube"
+          fi
+
+      - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: docker-image-frontend
-          path: exam-frontend-image.tar
+          name: coverage-${{ env.COMPONENT }}
+          path: ${{ env.APP_DIR }}/coverage/
+          if-no-files-found: ignore
 
-  # ========== DEPLOY TO EC2 ==========
-  deploy:
+  # ---------------------------------------------------------------
+  # 3. SONARQUBE STATIC ANALYSIS + QUALITY GATE
+  # ---------------------------------------------------------------
+  sonarqube:
+    name: SonarQube Analysis & Quality Gate
     runs-on: ubuntu-latest
-    needs: docker
-    if: success()
+    needs: unit-test
     steps:
-      - name: Download Docker image
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage report
+        continue-on-error: true   # no coverage artifact when there are no tests
         uses: actions/download-artifact@v4
         with:
-          name: docker-image-frontend
-          path: ./
+          name: coverage-${{ env.COMPONENT }}
+          path: ${{ env.APP_DIR }}/coverage/
 
-      - name: Copy Docker image to EC2
-        uses: appleboy/scp-action@v0.1.7
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v5.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "exam-frontend-image.tar"
-          target: "/home/ubuntu/exam-portal-frontend/"
+          projectBaseDir: ${{ env.APP_DIR }}
+          args: >
+            -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
+            -Dsonar.sources=.
+            -Dsonar.exclusions=node_modules/**,coverage/**,dist/**,server.js
+            -Dsonar.tests=tests
+            -Dsonar.test.inclusions=tests/**
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.coverage.exclusions=tests/**,src/main.jsx
 
-      - name: Deploy with Health Check & Rollback
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Quality Gate check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd /home/ubuntu/exam-portal-frontend/
-            echo "=========================================="
-            echo "Loading Docker image..."
-            echo "=========================================="
-            docker load -i exam-frontend-image.tar
-            echo ""
-            echo "=========================================="
-            echo "Testing new container on port 8080..."
-            echo "=========================================="
-            # Run test container on a temporary port
-            docker run -d \
-              --name test-container-frontend \
-              -p 8080:80 \
-              exam-frontend:new
-            sleep 10
-            # Health check (root path served by nginx from the built dist/)
-            if curl -f http://localhost:8080/; then
-              echo "Health check PASSED - Deploying..."
-              docker stop test-container-frontend
-              docker rm test-container-frontend
-              # Backup existing production container
-              if docker ps -a --format '{{.Names}}' | grep -q "^exam-frontend-prod$"; then
-                echo "Backing up current production..."
-                docker tag exam-frontend-prod exam-frontend-prod:backup
-                docker stop exam-frontend-prod
-                docker rm exam-frontend-prod
-              fi
-              # Run new production container
-              echo "Starting new production container..."
-              docker run -d \
-                --name exam-frontend-prod \
-                --restart always \
-                -p 80:80 \
-                exam-frontend:new
-              sleep 5
-              # Final health check
-              if curl -f http://localhost:80/; then
-                echo ""
-                echo "=========================================="
-                echo "DEPLOYMENT SUCCESSFUL!"
-                echo "=========================================="
-                echo "Frontend reachable via:"
-                echo "http://kts-exam.duckdns.org"
-                docker ps | grep exam-frontend-prod
-              else
-                echo "New container failed! Rolling back..."
-                docker stop exam-frontend-prod
-                docker rm exam-frontend-prod
-                docker run -d \
-                  --name exam-frontend-prod \
-                  --restart always \
-                  -p 80:80 \
-                  exam-frontend-prod:backup
-                echo "Rollback complete - Previous version restored"
-              fi
+          scanMetadataReportFile: ${{ env.APP_DIR }}/.scannerwork/report-task.txt
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # ---------------------------------------------------------------
+  # 4. TRIVY FILE + DEPENDENCY SCAN -> NEXUS
+  # ---------------------------------------------------------------
+  trivy-fs-scan:
+    name: Trivy File & Dependency Scan
+    runs-on: ubuntu-latest
+    needs: sonarqube
+    steps:
+      - uses: actions/checkout@v4
+
+      # Dependency report: vulnerabilities in package manifests / lock files
+      - name: Trivy dependency scan (report)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.APP_DIR }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          output: dependency-report.txt
+          exit-code: "0"
+
+      # File scan report: secrets + misconfigurations
+      - name: Trivy file scan (report)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.APP_DIR }}
+          scanners: secret,misconfig
+          severity: HIGH,CRITICAL
+          format: table
+          output: file-scan-report.txt
+          exit-code: "0"
+
+      - name: Upload reports to Nexus
+        if: always()
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_REPO: ${{ env.NEXUS_REPO }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          : "${NEXUS_URL:?NEXUS_URL is empty}"
+          : "${NEXUS_REPO:?NEXUS_REPO is empty}"
+          BASE="${NEXUS_URL%/}/repository/${NEXUS_REPO}"
+          NAME="build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
+          upload() {  # $1 = local file, $2 = Nexus folder
+            URL="${BASE}/$2/${NAME}"
+            code=$(curl -sS -o /tmp/nexus.out -w '%{http_code}' \
+              -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+              --upload-file "$1" "$URL")
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+              echo "Uploaded $1 -> $URL"
             else
-              echo ""
-              echo "=========================================="
-              echo "Health check FAILED - Not deploying!"
-              echo "=========================================="
-              echo "Keeping existing production container running"
-              echo ""
-              echo "Test container logs:"
-              docker logs test-container-frontend --tail 20
-              docker stop test-container-frontend
-              docker rm test-container-frontend
-              exit 1
+              echo "FAILED (HTTP $code) -> $URL"; head -c 500 /tmp/nexus.out; echo
+              return 1
             fi
-            # Cleanup
-            rm -f exam-frontend-image.tar
-            echo ""
-            echo "=========================================="
-            echo "Final Status:"
-            echo "=========================================="
-            docker ps
-            echo ""
-            echo "=========================================="
-            echo "Recent Logs:"
-            echo "=========================================="
-            docker logs exam-frontend-prod --tail 20
+          }
+          upload file-scan-report.txt   file-scan
+          upload dependency-report.txt  dependency-scan
+
+      # Gate runs AFTER the upload, so reports are stored even when it fails
+      - name: Trivy gate (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.APP_DIR }}
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  # ---------------------------------------------------------------
+  # 5. DOCKER BUILD -> TRIVY IMAGE SCAN -> NEXUS -> GATE -> PUSH
+  # ---------------------------------------------------------------
+  docker-build-scan-push:
+    name: Docker Build, Image Scan & Push
+    runs-on: ubuntu-latest
+    needs: trivy-fs-scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image variables
+        id: vars
+        run: |
+          echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "image=${APP_NAME}-${COMPONENT}" >> $GITHUB_OUTPUT
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_DIR }}
+          load: true
+          push: false
+          build-args: |
+            VITE_API_URL=${{ env.VITE_API_URL }}
+          tags: ${{ steps.vars.outputs.image }}:scan
+
+      # Runs the real image: nginx listens on port 80 inside the container (EXPOSE 80)
+      - name: Container health check (nginx on port 80)
+        run: |
+          docker run -d --name app-test -p 8080:80 ${{ steps.vars.outputs.image }}:scan
+          for i in $(seq 1 15); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || true)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              docker rm -f app-test
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs app-test || true
+          docker rm -f app-test || true
+          exit 1
+
+      - name: Trivy image scan (report)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ${{ steps.vars.outputs.image }}:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          output: image-scan-report.txt
+          exit-code: "0"
+
+      - name: Upload image report to Nexus
+        if: always()
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_REPO: ${{ env.NEXUS_REPO }}
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          : "${NEXUS_URL:?NEXUS_URL is empty}"
+          : "${NEXUS_REPO:?NEXUS_REPO is empty}"
+          TARGET="${NEXUS_URL%/}/repository/${NEXUS_REPO}/image-scan/build-${{ github.run_number }}-${GITHUB_SHA::7}.txt"
+          code=$(curl -sS -o /tmp/nexus.out -w '%{http_code}' \
+            -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+            --upload-file image-scan-report.txt "${TARGET}")
+          if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+            echo "Uploaded image-scan-report.txt -> ${TARGET}"
+          else
+            echo "FAILED (HTTP $code) -> ${TARGET}"; head -c 500 /tmp/nexus.out; echo
+            exit 1
+          fi
+
+      # VULNERABILITY GATE: blocks the push on HIGH/CRITICAL
+      - name: Vulnerability gate
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ${{ steps.vars.outputs.image }}:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Vulnerability gate result
+        run: echo "✅ Vulnerability gate passed successfully - no fixable HIGH/CRITICAL vulnerabilities found."
+
+      - name: Push skipped notice
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new-frontend'
+        run: echo "⚠️ Image push skipped - branch is '${{ github.ref_name }}', pushes only run on main and new-frontend."
+
+      - name: Login to Docker Hub
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to Docker Hub and GHCR
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_DIR }}
+          push: true
+          build-args: |
+            VITE_API_URL=${{ env.VITE_API_URL }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
+            ghcr.io/${{ steps.vars.outputs.owner }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
+
+      - name: Push result
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        run: echo "✅ Images pushed to Docker Hub and GHCR - tag ${{ steps.vars.outputs.tag }}."
