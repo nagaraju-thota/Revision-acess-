@@ -27,12 +27,13 @@ env:
   APP_PORT: "5000"
   HEALTH_PATH: /api/health
   APP_DIR: .                   # folder with package.json + Dockerfile (. = repo root)
-  MANIFEST_FILE: k8s/deployment.yaml  # file whose image tag is updated (skipped if missing)
   APP_NAME: backend-my-app             # image will be <APP_NAME>-<COMPONENT>
   NEXUS_REPO: backend-trivy-reports  # name of this component's repository in Nexus (raw, hosted)
   SONAR_PROJECT_KEY: backend-project   # exact project key of this component in SonarQube
   DATABASE_URL: ${{ secrets.DATABASE_URL }}   # add as a repo secret
-
+  GITOPS_REPO: nagaraju-thota/My-app-repo
+  GITOPS_BRANCH: main 
+  GITOPS_FILE: backend/kustomization.yaml
 permissions:
   contents: write              # update-manifest commits the new image tag
   packages: write              # push to GHCR
@@ -230,7 +231,6 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-
   # ---------------------------------------------------------------
   # 5. DOCKER BUILD -> TRIVY IMAGE SCAN -> NEXUS -> GATE -> PUSH
   # ---------------------------------------------------------------
@@ -238,6 +238,8 @@ jobs:
     name: Docker Build, Image Scan & Push
     runs-on: ubuntu-latest
     needs: trivy-fs-scan
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}      # <- makes the tag available to the next job
     steps:
       - uses: actions/checkout@v4
 
@@ -272,7 +274,7 @@ jobs:
         if: always()
         env:
           NEXUS_URL: ${{ secrets.NEXUS_URL }}
-          NEXUS_REPO: ${{ env.NEXUS_REPO }}     # or ${{ vars.NEXUS_REPO }} / ${{ secrets.NEXUS_REPO }}
+          NEXUS_REPO: ${{ env.NEXUS_REPO }}
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         run: |
@@ -288,6 +290,7 @@ jobs:
             echo "FAILED (HTTP $code) -> ${TARGET}"; head -c 500 /tmp/nexus.out; echo
             exit 1
           fi
+
       # VULNERABILITY GATE: blocks the push on HIGH/CRITICAL
       - name: Vulnerability gate
         uses: aquasecurity/trivy-action@v0.35.0
@@ -329,7 +332,57 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
             ghcr.io/${{ steps.vars.outputs.owner }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
 
-
       - name: Push result
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-backend'
-        run: echo "✅ Images pushed to Docker Hub and GHCR - tag ${{ steps.vars.outputs.tag }} and latest."
+        run: echo "✅ Images pushed to Docker Hub and GHCR - tag ${{ steps.vars.outputs.tag }}"
+
+  # ---------------------------------------------------------------
+  # 6. UPDATE IMAGE TAG IN THE GITOPS REPO (Argo CD then deploys it)
+  # ---------------------------------------------------------------
+  update-gitops-manifest:
+    name: Update image tag in GitOps repo
+    runs-on: ubuntu-latest
+    needs: docker-build-scan-push
+    # only when the image was actually pushed (same branches as the push step)
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-backend'
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          ref: ${{ env.GITOPS_BRANCH }}
+          token: ${{ secrets.GITOPS_TOKEN }}   # GITHUB_TOKEN cannot push to another repo
+
+      - name: Set new image tag
+        env:
+          TAG: ${{ needs.docker-build-scan-push.outputs.tag }}     # <- fixed
+        run: |
+          : "${TAG:?image tag is empty}"
+          test -f "${GITOPS_FILE}" || { echo "::error::${GITOPS_FILE} not found in ${GITOPS_REPO}"; exit 1; }
+          sed -i -E "s|^([[:space:]]*newTag:).*|\\1 \"${TAG}\"|" "${GITOPS_FILE}"
+          echo "--- ${GITOPS_FILE} after update:"
+          grep -n "newTag" "${GITOPS_FILE}"
+
+      - name: Commit and push
+        env:
+          TAG: ${{ needs.docker-build-scan-push.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Tag is already ${TAG}, nothing to commit."
+            exit 0
+          fi
+          git add "${GITOPS_FILE}"
+          git commit -m "ci: ${COMPONENT} image tag -> ${TAG} (build ${{ github.run_number }})"
+          for i in 1 2 3; do
+            git pull --rebase origin "${GITOPS_BRANCH}"
+            if git push origin "HEAD:${GITOPS_BRANCH}"; then
+              echo "Pushed. Argo CD will sync ${COMPONENT} to ${TAG}."
+              exit 0
+            fi
+            echo "Push failed (attempt $i), retrying..."
+            sleep 3
+          done
+          echo "::error::Could not push to ${GITOPS_REPO}"
+          exit 1
