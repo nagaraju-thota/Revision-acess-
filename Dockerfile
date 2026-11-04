@@ -14,7 +14,14 @@ RUN npm run build
 
 # Serve stage: unprivileged nginx (runs as non-root, listens on 8080)
 FROM nginxinc/nginx-unprivileged:alpine
+
+# Patch OS packages (brotli, curl, expat...) that the base image hasn't picked up yet
+USER root
+RUN apk upgrade --no-cache
+
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080
+
+# Back to non-root for runtime
 USER nginx
 CMD ["nginx", "-g", "daemon off;"]
