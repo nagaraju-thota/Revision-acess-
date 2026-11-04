@@ -10,6 +10,7 @@
 #   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
 #   VITE_API_URL                     - backend base URL, with /api (baked into the frontend at build time)
 # GHCR uses the built-in GITHUB_TOKEN.
+#   GITOPS_TOKEN                     - personal access token with read/write (Contents) on the GitOps repo
 #
 # Nexus: each pipeline has its OWN "raw (hosted)" repository (NEXUS_REPO below):
 #   frontend pipeline -> frontend-trivy-reports, backend pipeline -> backend-trivy-reports
@@ -28,9 +29,11 @@ env:
   APP_PORT: "4173"             # "npm start" = vite preview (serves the built dist/ on 4173)
   HEALTH_PATH: /               # frontend has no /api/health, the home page returning 200 is enough
   APP_DIR: .                   # folder with package.json + Dockerfile (. = repo root)
-  MANIFEST_FILE: k8s/deployment.yaml  # file whose image tag is updated (skipped if missing)
+  GITOPS_REPO: https://github.com/nagaraju-thota/My-app-repo.git   # the manifests (GitOps) repo, owner/name
+  GITOPS_BRANCH: main                                 # branch Argo CD watches
+  GITOPS_FILE: frontend/kustomization.yaml            # file whose newTag is updated
   APP_NAME: frontend-my-app            # image will be <APP_NAME>-<COMPONENT>
-  NEXUS_REPO: frontend-trivy-reports # name of this component's repository in Nexus (raw, hosted)
+  NEXUS_REPO: trivy-scan-reports # name of this component's repository in Nexus (raw, hosted)
   SONAR_PROJECT_KEY: frontend-project  # exact project key of this component in SonarQube
   # Backend URL baked into the bundle at BUILD time (Vite reads it then, not at runtime).
   # Use "/api" when nginx/Ingress forwards /api to the backend, or a full URL like https://api.example.com/api
@@ -243,6 +246,8 @@ jobs:
     name: Docker Build, Image Scan & Push
     runs-on: ubuntu-latest
     needs: trivy-fs-scan
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
