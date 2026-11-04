@@ -21,6 +21,9 @@
 
 name: Frontend DevSecOps Pipeline
 on:
+  push:
+    branches: 
+      new_frontend 
   workflow_dispatch:
 
 env:
