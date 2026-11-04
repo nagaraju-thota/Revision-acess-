@@ -271,10 +271,10 @@ jobs:
             VITE_API_URL=${{ env.VITE_API_URL }}
           tags: ${{ steps.vars.outputs.image }}:scan
 
-      # Runs the real image: nginx listens on port 80 inside the container (EXPOSE 80)
-      - name: Container health check (nginx on port 80)
+      # Runs the real image: unprivileged nginx listens on port 8080 inside the container (EXPOSE 8080)
+      - name: Container health check (nginx on port 8080)
         run: |
-          docker run -d --name app-test -p 8080:80 ${{ steps.vars.outputs.image }}:scan
+          docker run -d --name app-test -p 8080:8080 ${{ steps.vars.outputs.image }}:scan
           for i in $(seq 1 15); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || true)
             echo "Attempt $i: HTTP $STATUS"
