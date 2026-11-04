@@ -334,18 +334,18 @@ jobs:
         run: echo "✅ Vulnerability gate passed successfully - no fixable HIGH/CRITICAL vulnerabilities found."
 
       - name: Push skipped notice
-        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new-frontend'
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/new_frontend'
         run: echo "⚠️ Image push skipped - branch is '${{ github.ref_name }}', pushes only run on main and new-frontend."
 
       - name: Login to Docker Hub
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new_frontend'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to GitHub Container Registry
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new_frontend'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -353,7 +353,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push to Docker Hub and GHCR
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new_frontend'
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.APP_DIR }}
@@ -365,5 +365,5 @@ jobs:
             ghcr.io/${{ steps.vars.outputs.owner }}/${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
 
       - name: Push result
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new-frontend'
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new_frontend'
         run: echo "✅ Images pushed to Docker Hub and GHCR - tag ${{ steps.vars.outputs.tag }}."
