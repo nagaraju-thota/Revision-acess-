@@ -22,7 +22,7 @@
 name: Frontend DevSecOps Pipeline
 
 on:
-  workflow_dispatch:
+  workflow_dispatch
 
 env:
   COMPONENT: frontend          # label only: frontend or backend -> used in image name
