@@ -1,37 +1,20 @@
-FROM node:20-alpine AS builder
-
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm install
-
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-EXPOSE 80
-
-CMD ["nginx", "-g", "daemon off;"]
 # Build stage
 FROM node:20-alpine AS build
-
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm ci
+
+# Backend URL is baked into the JS bundle at build time (Vite)
+ARG VITE_API_URL
+ENV VITE_API_URL=$VITE_API_URL
 
 COPY . .
 RUN npm run build
 
-
-# NGINX stage
-FROM nginx:alpine
-
+# Serve stage: unprivileged nginx (runs as non-root, listens on 8080)
+FROM nginxinc/nginx-unprivileged:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
-
-EXPOSE 80
-
+EXPOSE 8080
+USER nginx
 CMD ["nginx", "-g", "daemon off;"]
