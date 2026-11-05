@@ -31,7 +31,7 @@ env:
   APP_PORT: "4173"             # "npm start" = vite preview (serves the built dist/ on 4173)
   HEALTH_PATH: /               # frontend has no /api/health, the home page returning 200 is enough
   APP_DIR: .                   # folder with package.json + Dockerfile (. = repo root)
-  GITOPS_REPO: https://github.com/nagaraju-thota/My-app-repo.git   # the manifests (GitOps) repo, owner/name
+  GITOPS_REPO: nagaraju-thota/My-app-repo   # the manifests (GitOps) repo, owner/name
   GITOPS_BRANCH: main                                 # branch Argo CD watches
   GITOPS_FILE: frontend/kustomization.yaml            # file whose newTag is updated
   APP_NAME: frontend-my-app            # image will be <APP_NAME>-<COMPONENT>
