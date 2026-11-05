@@ -1,4 +1,4 @@
-# Frontend DevSecOps pipeline (standalone).
+# Frontend DevSecOps pipeline for exam app (standalone).
 # The only things that differ from backend-pipeline.yml are the values in the env block
 # (COMPONENT, APP_PORT, HEALTH_PATH, NEXUS_REPO, SONAR_PROJECT_KEY) and the workflow name.
 # Each component lives in its OWN GitHub repo, so put each file in its own repo.
