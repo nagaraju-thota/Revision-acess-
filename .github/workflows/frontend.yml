@@ -367,3 +367,57 @@ jobs:
       - name: Push result
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new_frontend'
         run: echo "✅ Images pushed to Docker Hub and GHCR - tag ${{ steps.vars.outputs.tag }}."
+
+          # ---------------------------------------------------------------
+  # 6. UPDATE IMAGE TAG IN THE GITOPS REPO (Argo CD then deploys it)
+  # ---------------------------------------------------------------
+  update-gitops-manifest:
+    name: Update image tag in GitOps repo
+    runs-on: ubuntu-latest
+    needs: docker-build-scan-push
+    environment:
+      name: production-approval        # needs a reviewer rule in Settings -> Environments
+    # only when the image was actually pushed (same branches as the push step)
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/new_frontend'
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          ref: ${{ env.GITOPS_BRANCH }}
+          token: ${{ secrets.GITOPS_TOKEN }}   # GITHUB_TOKEN cannot push to another repo
+
+      - name: Set new image tag
+        env:
+          TAG: ${{ needs.docker-build-scan-push.outputs.tag }}
+        run: |
+          : "${TAG:?image tag is empty}"
+          test -f "${GITOPS_FILE}" || { echo "::error::${GITOPS_FILE} not found in ${GITOPS_REPO}"; exit 1; }
+          sed -i -E "s|^([[:space:]]*newTag:).*|\\1 \"${TAG}\"|" "${GITOPS_FILE}"
+          echo "--- ${GITOPS_FILE} after update:"
+          grep -n "newTag" "${GITOPS_FILE}"
+
+      - name: Commit and push
+        env:
+          TAG: ${{ needs.docker-build-scan-push.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Tag is already ${TAG}, nothing to commit."
+            exit 0
+          fi
+          git add "${GITOPS_FILE}"
+          git commit -m "ci: ${COMPONENT} image tag -> ${TAG} (build ${{ github.run_number }})"
+          for i in 1 2 3; do
+            git pull --rebase origin "${GITOPS_BRANCH}"
+            if git push origin "HEAD:${GITOPS_BRANCH}"; then
+              echo "Pushed. Argo CD will sync ${COMPONENT} to ${TAG}."
+              exit 0
+            fi
+            echo "Push failed (attempt $i), retrying..."
+            sleep 3
+          done
+          echo "::error::Could not push to ${GITOPS_REPO}"
+          exit 1
+
